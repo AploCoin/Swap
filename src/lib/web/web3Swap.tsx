@@ -6,7 +6,7 @@ import { useEthersSigner } from "@/hooks/useSigner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useState, useEffect } from "react";
+import { useState, useEffect, forwardRef, useImperativeHandle } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import {
@@ -75,7 +75,15 @@ const getTokenKeyByAddress = (address: string): string => {
   return entry ? entry[0] : 'MANUAL';
 };
 
-export default function Swap() {
+export interface SwapRef {
+  setToken0: (value: string) => void;
+  setToken1: (value: string) => void;
+  setAmount: (value: string) => void;
+  setContractAddress: (value: string) => void;
+  initializeContract: (address: string) => void;
+}
+
+const Swap = forwardRef<SwapRef>((props, ref) => {
   const [contract, setContract] = useState<ethers.Contract | null>(null);
   const signer = useEthersSigner();
   const { address: userAccount } = useAccount();
@@ -91,6 +99,8 @@ export default function Swap() {
   const [poolExists, setPoolExists] = useState<boolean | null>(null);
   const [poolError, setPoolError] = useState<string | null>(null);
   const [token0Balance, setToken0Balance] = useState<string | null>(null);
+  const [waploBalance, setWaploBalance] = useState<string | null>(null);
+  const [aploBalance, setAploBalance] = useState<string | null>(null);
   const [insufficientBalance, setInsufficientBalance] = useState(false);
   const { toast } = useToast();
   const [showHistory, setShowHistory] = useState(false);
@@ -98,15 +108,33 @@ export default function Swap() {
   const [token0Selected, setToken0Selected] = useState('MANUAL');
   const [token1Selected, setToken1Selected] = useState('MANUAL');
 
+  useImperativeHandle(ref, () => ({
+    setToken0: (value: string) => {
+      setToken0(value);
+      setToken0Selected(getTokenKeyByAddress(value));
+    },
+    setToken1: (value: string) => {
+      setToken1(value);
+      setToken1Selected(getTokenKeyByAddress(value));
+    },
+    setAmount,
+    setContractAddress,
+    initializeContract
+  }));
+
   const getTokenName = async (tokenAddress: string): Promise<string> => {
     if (!signer || !ethers.isAddress(tokenAddress)) return "";
     
     try {
       const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-      return await tokenContract.name();
+      const [name, symbol] = await Promise.all([
+        tokenContract.name().catch(() => ""),
+        tokenContract.symbol().catch(() => "")
+      ]);
+      return name || symbol || formatAddress(tokenAddress);
     } catch (error) {
       console.error("Error getting token name:", error);
-      return tokenAddress.slice(0, 6) + "..." + tokenAddress.slice(-4);
+      return formatAddress(tokenAddress);
     }
   };
 
@@ -308,21 +336,98 @@ export default function Swap() {
         userAccount,
         contractAddress
       );
-      if (BigInt(allowance) < ethers.parseUnits(amount, 18)) {
+      
+      const amountToApprove = ethers.parseUnits(amount, 18);
+      if (BigInt(allowance) < amountToApprove) {
+        console.log("Approving token...");
         const tx = await tokenContract.approve(
           contractAddress,
-          ethers.parseUnits(amount, 18)
+          amountToApprove
         );
         await tx.wait();
         console.log("Token approved");
-      } else {
-        console.log("Allowance already sufficient");
+        
+        // Проверяем, что разрешение действительно установлено
+        const newAllowance = await tokenContract.allowance(userAccount, contractAddress);
+        if (BigInt(newAllowance) < amountToApprove) {
+          throw new Error("Approval failed - allowance not set correctly");
+        }
       }
     } catch (error) {
       console.error("Approval failed:", error);
+      throw new Error("Failed to approve token: " + (error instanceof Error ? error.message : "Unknown error"));
+    }
+  };
+
+  const convertAploToWaplo = async (amount: string): Promise<void> => {
+    if (!signer) throw new Error("Signer is not initialized");
+    try {
+      const tx = await signer.sendTransaction({
+        to: DEFAULT_TOKENS.WAPLO.address,
+        value: ethers.parseUnits(amount, 18)
+      });
+      await tx.wait();
+      toast({
+        title: "Success",
+        description: "Successfully converted APLO to WAPLO",
+      });
+    } catch (error) {
+      console.error("Error converting APLO to WAPLO:", error);
       throw error;
     }
   };
+
+  const checkPoolExists = async (token0: string, token1: string): Promise<boolean> => {
+    if (!contract) return false;
+    try {
+      const poolId = await contract.getPoolId(token0, token1);
+      const pool = await contract.pools(poolId);
+      return pool.token0 !== ethers.ZeroAddress;
+    } catch (error) {
+      console.error("Error checking pool:", error);
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    const checkPool = async () => {
+      if (token0 && token1 && contract) {
+        try {
+          const isAplo = token0.toLowerCase() === DEFAULT_TOKENS.APLO.address.toLowerCase();
+          const isWaplo = token0.toLowerCase() === DEFAULT_TOKENS.WAPLO.address.toLowerCase();
+          
+          if (isAplo) {
+            // Если выбран APLO, проверяем пул с WAPLO
+            const waploPoolExists = await checkPoolExists(DEFAULT_TOKENS.WAPLO.address, token1);
+            const aploPoolExists = await checkPoolExists(token0, token1);
+            
+            setPoolExists(waploPoolExists || aploPoolExists);
+            if (waploPoolExists) {
+              // Если есть пул с WAPLO, автоматически переключаемся на него
+              setToken0(DEFAULT_TOKENS.WAPLO.address);
+              setToken0Selected('WAPLO');
+              setPoolError("Switching to WAPLO pool for swap");
+            } else if (!aploPoolExists) {
+              setPoolError("No available pools for swap");
+            } else {
+              setPoolError(null);
+            }
+          } else {
+            const exists = await checkPoolExists(token0, token1);
+            setPoolExists(exists);
+            setPoolError(exists ? null : "Pool does not exist for this token pair");
+          }
+        } catch (error) {
+          setPoolExists(false);
+          setPoolError("Error checking pool status");
+        }
+      } else {
+        setPoolExists(null);
+        setPoolError(null);
+      }
+    };
+    checkPool();
+  }, [token0, token1, contract]);
 
   const swapTokens = async (
     token0: string,
@@ -331,35 +436,111 @@ export default function Swap() {
     contractAddress: string
   ): Promise<void> => {
     if (!contract) throw new Error("Contract is not initialized");
+    if (!signer) throw new Error("Signer is not initialized");
 
-    if (!ethers.isAddress(token0) || !ethers.isAddress(token1)) {
-      throw new Error("Invalid token addresses");
-    }
-
-    if (parseFloat(amountIn) <= 0) {
-      throw new Error("Invalid amount");
-    }
-
-    const poolId = await getPoolId(token0, token1);
-    if (!poolId) {
-      throw new Error("Pool does not exist!");
-    }
-
-    console.log("Swapping tokens in pool:", poolId);
-
-    await approveToken(token0, amountIn, contractAddress);
+    const isAplo = token0.toLowerCase() === DEFAULT_TOKENS.APLO.address.toLowerCase();
+    const isWaplo = token0.toLowerCase() === DEFAULT_TOKENS.WAPLO.address.toLowerCase();
+    let finalToken0 = token0;
 
     try {
+      // Проверяем балансы
+      if (isAplo || isWaplo) {
+        const waploBalance = await getTokenBalance(DEFAULT_TOKENS.WAPLO.address);
+        const aploBalance = await getTokenBalance(DEFAULT_TOKENS.APLO.address);
+        const requiredAmount = parseFloat(amountIn);
+
+        if (parseFloat(waploBalance) < requiredAmount && parseFloat(aploBalance) < requiredAmount) {
+          throw new Error("Insufficient balance of both WAPLO and APLO");
+        }
+
+        // Проверяем существование пула с WAPLO
+        const waploPoolExists = await checkPoolExists(DEFAULT_TOKENS.WAPLO.address, token1);
+        
+        if (isAplo && waploPoolExists) {
+          console.log("Converting APLO to WAPLO...");
+          await convertAploToWaplo(amountIn);
+          finalToken0 = DEFAULT_TOKENS.WAPLO.address;
+          
+          // Проверяем, что конвертация прошла успешно
+          const newWaploBalance = await getTokenBalance(DEFAULT_TOKENS.WAPLO.address);
+          if (parseFloat(newWaploBalance) < requiredAmount) {
+            throw new Error("APLO to WAPLO conversion failed");
+          }
+        } else if (isWaplo && parseFloat(waploBalance) < requiredAmount && parseFloat(aploBalance) >= requiredAmount) {
+          console.log("Converting APLO to WAPLO due to insufficient WAPLO balance...");
+          await convertAploToWaplo(amountIn);
+          
+          // Проверяем баланс после конвертации
+          const newWaploBalance = await getTokenBalance(DEFAULT_TOKENS.WAPLO.address);
+          if (parseFloat(newWaploBalance) < requiredAmount) {
+            throw new Error("APLO to WAPLO conversion failed");
+          }
+        }
+      }
+
+      // Получаем и проверяем pool ID
+      const poolId = await getPoolId(finalToken0, token1);
+      if (!poolId) {
+        throw new Error("Pool does not exist!");
+      }
+
+      // Проверяем и устанавливаем разрешение на использование токенов
+      if (finalToken0 === DEFAULT_TOKENS.WAPLO.address) {
+        console.log("Approving WAPLO for swap...");
+        await approveToken(finalToken0, amountIn, contractAddress);
+      }
+
+      // Выполняем свап
+      console.log("Executing swap...");
+      const amountInWei = ethers.parseUnits(amountIn, 18);
+      const gasEstimate = await contract.swap.estimateGas(
+        poolId,
+        finalToken0,
+        amountInWei
+      );
+
+      // Увеличиваем лимит газа на 20%
+      const gasLimit = gasEstimate + (gasEstimate * BigInt(20) / BigInt(100));
+
       const tx = await contract.swap(
         poolId,
-        token0,
-        ethers.parseUnits(amountIn, 18)
+        finalToken0,
+        amountInWei,
+        { gasLimit }
       );
+
+      console.log("Waiting for transaction confirmation...");
       await tx.wait();
-      console.log(`Successfully swapped ${amountIn} of ${token0}`);
+      console.log(`Successfully swapped ${amountIn} of ${finalToken0}`);
+      
+      // Сохраняем в историю
+      await saveToHistory();
+      
+      toast({
+        title: "Success",
+        description: `Successfully swapped ${amountIn} ${token0Name || finalToken0}`,
+      });
     } catch (error) {
       console.error("Swap failed:", error);
-      throw error;
+      let errorMessage = "Swap failed: ";
+      
+      if (error instanceof Error) {
+        if (error.message.includes("Internal JSON-RPC error")) {
+          errorMessage += "Transaction was rejected. Please check your balance and try again.";
+        } else {
+          errorMessage += error.message;
+        }
+      } else {
+        errorMessage += "Unknown error occurred";
+      }
+      
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: errorMessage,
+      });
+      
+      throw new Error(errorMessage);
     }
   };
 
@@ -384,37 +565,6 @@ export default function Swap() {
     };
   };
 
-  const checkPoolExists = async (token0: string, token1: string): Promise<boolean> => {
-    if (!contract) return false;
-    try {
-      const poolId = await contract.getPoolId(token0, token1);
-      const pool = await contract.pools(poolId);
-      return pool.token0 !== ethers.ZeroAddress;
-    } catch (error) {
-      console.error("Error checking pool:", error);
-      return false;
-    }
-  };
-
-  useEffect(() => {
-    const checkPool = async () => {
-      if (token0 && token1 && contract) {
-        try {
-          const exists = await checkPoolExists(token0, token1);
-          setPoolExists(exists);
-          setPoolError(exists ? null : "Pool does not exist for this token pair");
-        } catch (error) {
-          setPoolExists(false);
-          setPoolError("Error checking pool status");
-        }
-      } else {
-        setPoolExists(null);
-        setPoolError(null);
-      }
-    };
-    checkPool();
-  }, [token0, token1, contract]);
-
   const calculateSwapAmount = async (
     token1: string,
     token2: string,
@@ -424,6 +574,16 @@ export default function Swap() {
     if (!poolExists) throw new Error("Pool does not exist for this token pair");
 
     try {
+      // Если выбран APLO, проверяем пул с WAPLO
+      const isAplo = token1.toLowerCase() === DEFAULT_TOKENS.APLO.address.toLowerCase();
+      if (isAplo) {
+        const waploPoolExists = await checkPoolExists(DEFAULT_TOKENS.WAPLO.address, token2);
+        if (waploPoolExists) {
+          // Используем WAPLO вместо APLO для расчета
+          token1 = DEFAULT_TOKENS.WAPLO.address;
+        }
+      }
+
       const poolId = await contract.getPoolId(token1, token2);
       const pool = await contract.pools(poolId);
 
@@ -512,11 +672,45 @@ export default function Swap() {
 
   const checkBalance = async () => {
     if (token0 && amount) {
-      const balance = await getTokenBalance(token0);
-      setToken0Balance(balance);
-      setInsufficientBalance(parseFloat(balance) < parseFloat(amount));
+      const isAplo = token0.toLowerCase() === DEFAULT_TOKENS.APLO.address.toLowerCase();
+      const isWaplo = token0.toLowerCase() === DEFAULT_TOKENS.WAPLO.address.toLowerCase();
+
+      if (isAplo || isWaplo) {
+        const waploBalance = await getTokenBalance(DEFAULT_TOKENS.WAPLO.address);
+        const aploBalance = await getTokenBalance(DEFAULT_TOKENS.APLO.address);
+        
+        setWaploBalance(waploBalance);
+        setAploBalance(aploBalance);
+        
+        const waploAmount = parseFloat(waploBalance);
+        const aploAmount = parseFloat(aploBalance);
+        const requiredAmount = parseFloat(amount);
+
+        // Проверяем существование пула с WAPLO
+        const waploPoolExists = await checkPoolExists(DEFAULT_TOKENS.WAPLO.address, token1);
+
+        if (isAplo && waploPoolExists) {
+          // Если есть пул с WAPLO, проверяем оба баланса
+          setInsufficientBalance(waploAmount < requiredAmount && aploAmount < requiredAmount);
+          setToken0Balance(aploAmount >= requiredAmount ? aploBalance : waploBalance);
+        } else if (isWaplo) {
+          // Для WAPLO проверяем оба баланса
+          setInsufficientBalance(waploAmount < requiredAmount && aploAmount < requiredAmount);
+          setToken0Balance(waploAmount >= requiredAmount ? waploBalance : aploBalance);
+        } else {
+          // Если нет пула с WAPLO, проверяем только APLO
+          setInsufficientBalance(aploAmount < requiredAmount);
+          setToken0Balance(aploBalance);
+        }
+      } else {
+        const balance = await getTokenBalance(token0);
+        setToken0Balance(balance);
+        setInsufficientBalance(parseFloat(balance) < parseFloat(amount));
+      }
     } else {
       setToken0Balance(null);
+      setWaploBalance(null);
+      setAploBalance(null);
       setInsufficientBalance(false);
     }
   };
@@ -558,83 +752,6 @@ export default function Swap() {
           <Button onClick={handleInitializeContract} className="mt-2">
             Initialize Contract
           </Button>
-          <Dialog>
-            <DialogTrigger asChild>
-              <Button variant="outline" className="mt-2" onClick={loadContractHistory}>
-                View History
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <div className="flex justify-between items-center">
-                  <DialogTitle>Swap History</DialogTitle>
-                  <Button 
-                    variant="destructive" 
-                    size="sm"
-                    onClick={clearHistory}
-                  >
-                    Clear History
-                  </Button>
-                </div>
-              </DialogHeader>
-              <div className="grid gap-4">
-                <div>
-                  <h4 className="mb-2 font-medium">Local History</h4>
-                  {swapHistory.map((item, index) => (
-                    <div
-                      key={index}
-                      className="mb-2 p-2 bg-gray-100 rounded cursor-pointer hover:bg-gray-200"
-                    >
-                      <div className="flex flex-col items-center">
-                        <div className="w-full">
-                          <p>{item.token0Name || formatAddress(item.token0)} → {item.token1Name || formatAddress(item.token1)}</p>
-                          <p className="text-sm text-gray-600">Amount: {item.amount}</p>
-                          {item.outputAmount && (
-                            <p className="text-sm text-gray-600">Output: {item.outputAmount}</p>
-                          )}
-                          <p className="text-xs text-gray-500">
-                            {new Date(item.timestamp).toLocaleString()}
-                          </p>
-                        </div>
-                        <Button 
-                          size="sm" 
-                          className="mt-2"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            loadFromHistory(item);
-                            setShowHistory(false);
-                          }}
-                        >
-                          Use
-                        </Button>
-                      </div>
-                      <div className="mt-2 text-xs text-gray-500">
-                        <p>Contract: {formatAddress(item.contractAddress)}</p>
-                        <p>Token0: {formatAddress(item.token0)}</p>
-                        <p>Token1: {formatAddress(item.token1)}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div>
-                  <h4 className="mb-2 font-medium">Contract History</h4>
-                  {contractHistory.map((item, index) => (
-                    <div
-                      key={index}
-                      className="mb-2 p-2 bg-gray-100 rounded cursor-pointer hover:bg-gray-200"
-                      onClick={() => {
-                        loadFromHistory(item);
-                        setShowHistory(false);
-                      }}
-                    >
-                      <p>{item.token0Name} → {item.token1Name}</p>
-                      <Button size="sm" className="mt-1">Use</Button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </DialogContent>
-          </Dialog>
         </div>
       </div>
 
@@ -686,11 +803,26 @@ export default function Swap() {
         </Tooltip>
         {token0Name && (
           <div className="text-sm mt-1">
-            <p className="text-gray-600">Token: {token0Name}</p>
+            <p className="text-muted-foreground">Token: {token0Name}</p>
             {token0Balance && (
-              <p className={`${insufficientBalance ? 'text-red-500' : 'text-gray-600'}`}>
-                Balance: {parseFloat(token0Balance).toFixed(6)} {token0Name}
-              </p>
+              <div>
+                {(token0.toLowerCase() === DEFAULT_TOKENS.APLO.address.toLowerCase() ||
+                  token0.toLowerCase() === DEFAULT_TOKENS.WAPLO.address.toLowerCase()) ? (
+                  <>
+                    <p className={`${insufficientBalance ? 'text-destructive' : 'text-muted-foreground'}`}>
+                      WAPLO Balance: {waploBalance ? parseFloat(waploBalance).toFixed(6) : '0'} WAPLO
+                    </p>
+                    <p className={`${insufficientBalance ? 'text-destructive' : 'text-muted-foreground'}`}>
+                      APLO Balance: {aploBalance ? parseFloat(aploBalance).toFixed(6) : '0'} APLO
+                    </p>
+                    <p className="text-muted-foreground">Note: You can use either WAPLO or APLO for this swap</p>
+                  </>
+                ) : (
+                  <p className={`${insufficientBalance ? 'text-destructive' : 'text-muted-foreground'}`}>
+                    Balance: {parseFloat(token0Balance).toFixed(6)} {token0Name}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -819,4 +951,6 @@ export default function Swap() {
       </Button>
     </TooltipProvider>
   );
-}
+});
+
+export default Swap;

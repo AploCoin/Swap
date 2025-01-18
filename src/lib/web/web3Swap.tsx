@@ -71,6 +71,22 @@ const getTokenKeyByAddress = (address: string): string => {
   return entry ? entry[0] : 'MANUAL';
 };
 
+const getTokenName = async (tokenAddress: string): Promise<string> => {
+  if (!signer || !ethers.isAddress(tokenAddress)) return "";
+  
+  try {
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+    const [name, symbol] = await Promise.all([
+      tokenContract.name().catch(() => ""),
+      tokenContract.symbol().catch(() => "")
+    ]);
+    return name || symbol || formatAddress(tokenAddress);
+  } catch (error) {
+    console.error("Error getting token name:", error);
+    return formatAddress(tokenAddress);
+  }
+};
+
 export interface SwapRef {
   setToken0: (value: string) => void;
   setToken1: (value: string) => void;
@@ -646,12 +662,23 @@ const Swap = forwardRef<SwapRef>((props, ref) => {
   }, [token0, token1, contract]);
 
   useEffect(() => {
-    loadTokenNames();
-  }, [token0, token1]);
-
-  useEffect(() => {
     loadSwapHistory();
   }, []);
+
+  useEffect(() => {
+  const loadTokenNames = async () => {
+    if (token0) {
+      const name = await getTokenName(token0);
+      setToken0Name(name);
+    }
+    if (token1) {
+      const name = await getTokenName(token1);
+      setToken1Name(name);
+    }
+  };
+
+  loadTokenNames();
+}, [token0, token1]);
 
   const getTokenBalance = async (tokenAddress: string): Promise<string> => {
     if (!signer || !userAccount || !ethers.isAddress(tokenAddress)) return "0";

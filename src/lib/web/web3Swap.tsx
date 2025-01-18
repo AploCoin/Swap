@@ -36,12 +36,8 @@ const DEFAULT_TOKENS = {
     address: "",
     name: "Enter manually"
   },
-  WAPLO: {
-    address: "0xd3F708a6aAfEDD0845928215E74a0f59cAC2D1f0",
-    name: "WAPLO"
-  },
   APLO: {
-    address: "0x0000000000000000000000000000000000001235",
+    address: "0xd3F708a6aAfEDD0845928215E74a0f59cAC2D1f0",
     name: "APLO"
   },
   GAPLO: {

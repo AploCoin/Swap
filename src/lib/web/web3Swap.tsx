@@ -10,13 +10,6 @@ import { useState, useEffect, forwardRef, useImperativeHandle } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -29,15 +22,18 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cookies } from 'next/headers';
 
 const DEFAULT_TOKENS = {
   MANUAL: {
     address: "",
     name: "Enter manually"
   },
-  APLO: {
+  WAPLO: {
     address: "0xd3F708a6aAfEDD0845928215E74a0f59cAC2D1f0",
+    name: "WAPLO"
+  },
+  APLO: {
+    address: "0x0000000000000000000000000000000000001235",
     name: "APLO"
   },
   GAPLO: {
@@ -71,21 +67,6 @@ const getTokenKeyByAddress = (address: string): string => {
   return entry ? entry[0] : 'MANUAL';
 };
 
-const getTokenName = async (tokenAddress: string): Promise<string> => {
-  if (!signer || !ethers.isAddress(tokenAddress)) return "";
-  
-  try {
-    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-    const [name, symbol] = await Promise.all([
-      tokenContract.name().catch(() => ""),
-      tokenContract.symbol().catch(() => "")
-    ]);
-    return name || symbol || formatAddress(tokenAddress);
-  } catch (error) {
-    console.error("Error getting token name:", error);
-    return formatAddress(tokenAddress);
-  }
-};
 
 export interface SwapRef {
   setToken0: (value: string) => void;
@@ -115,8 +96,6 @@ const Swap = forwardRef<SwapRef>((props, ref) => {
   const [aploBalance, setAploBalance] = useState<string | null>(null);
   const [insufficientBalance, setInsufficientBalance] = useState(false);
   const { toast } = useToast();
-  const [showHistory, setShowHistory] = useState(false);
-  const [contractHistory, setContractHistory] = useState<SwapHistory[]>([]);
   const [token0Selected, setToken0Selected] = useState('MANUAL');
   const [token1Selected, setToken1Selected] = useState('MANUAL');
 
@@ -203,46 +182,7 @@ const Swap = forwardRef<SwapRef>((props, ref) => {
     saveToLocalStorage('swapHistory', updatedHistory);
   };
 
-  const loadFromHistory = (historyItem: SwapHistory) => {
-    setToken0(historyItem.token0);
-    setToken1(historyItem.token1);
-    setAmount(historyItem.amount);
-    setContractAddress(historyItem.contractAddress);
-    // Определяем токены из списка
-    setToken0Selected(getTokenKeyByAddress(historyItem.token0));
-    setToken1Selected(getTokenKeyByAddress(historyItem.token1));
-    initializeContract(historyItem.contractAddress);
-  };
 
-  const loadContractHistory = async () => {
-    if (!contract || !userAccount) return;
-
-    try {
-      // Получаем все пулы пользователя
-      const userPools = await contract.getPoolsByOwner(userAccount);
-      const history: SwapHistory[] = [];
-
-      // Для каждого пула получаем информацию
-      for (const poolId of userPools) {
-        const pool = await contract.pools(poolId);
-        if (pool) {
-          history.push({
-            token0: pool.token0,
-            token1: pool.token1,
-            amount: "0", // Здесь можно добавить логику для получения последней суммы обмена
-            token0Name: await getTokenName(pool.token0),
-            token1Name: await getTokenName(pool.token1),
-            timestamp: Date.now(),
-            contractAddress
-          });
-        }
-      }
-
-      setContractHistory(history);
-    } catch (error) {
-      console.error("Error loading contract history:", error);
-    }
-  };
 
   const handleInitializeContract = () => {
     if (!contractAddress) {
@@ -742,15 +682,7 @@ const Swap = forwardRef<SwapRef>((props, ref) => {
     checkBalance();
   }, [token0, amount, userAccount]);
 
-  // Добавляем функцию очистки истории
-  const clearHistory = () => {
-    setSwapHistory([]);
-    saveToLocalStorage('swapHistory', []);
-    toast({
-      title: "Success",
-      description: "History cleared successfully!",
-    });
-  };
+
 
   return (
     <TooltipProvider>

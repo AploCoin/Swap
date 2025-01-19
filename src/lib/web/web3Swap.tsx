@@ -36,12 +36,8 @@ const DEFAULT_TOKENS = {
     address: "",
     name: "Enter manually"
   },
-  WAPLO: {
-    address: "0xd3F708a6aAfEDD0845928215E74a0f59cAC2D1f0",
-    name: "WAPLO"
-  },
   APLO: {
-    address: "0x0000000000000000000000000000000000001235",
+    address: "0xd3F708a6aAfEDD0845928215E74a0f59cAC2D1f0",
     name: "APLO"
   },
   GAPLO: {
@@ -73,6 +69,22 @@ const getTokenKeyByAddress = (address: string): string => {
     token.address.toLowerCase() === address.toLowerCase()
   );
   return entry ? entry[0] : 'MANUAL';
+};
+
+const getTokenName = async (tokenAddress: string): Promise<string> => {
+  if (!signer || !ethers.isAddress(tokenAddress)) return "";
+  
+  try {
+    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+    const [name, symbol] = await Promise.all([
+      tokenContract.name().catch(() => ""),
+      tokenContract.symbol().catch(() => "")
+    ]);
+    return name || symbol || formatAddress(tokenAddress);
+  } catch (error) {
+    console.error("Error getting token name:", error);
+    return formatAddress(tokenAddress);
+  }
 };
 
 export interface SwapRef {
@@ -650,12 +662,23 @@ const Swap = forwardRef<SwapRef>((props, ref) => {
   }, [token0, token1, contract]);
 
   useEffect(() => {
-    loadTokenNames();
-  }, [token0, token1]);
-
-  useEffect(() => {
     loadSwapHistory();
   }, []);
+
+  useEffect(() => {
+  const loadTokenNames = async () => {
+    if (token0) {
+      const name = await getTokenName(token0);
+      setToken0Name(name);
+    }
+    if (token1) {
+      const name = await getTokenName(token1);
+      setToken1Name(name);
+    }
+  };
+
+  loadTokenNames();
+}, [token0, token1]);
 
   const getTokenBalance = async (tokenAddress: string): Promise<string> => {
     if (!signer || !userAccount || !ethers.isAddress(tokenAddress)) return "0";
